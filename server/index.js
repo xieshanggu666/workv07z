@@ -52,8 +52,11 @@ function power(circuit) {
   const rng = (Math.random() * 0.22 - 0.11)
   return (air * parts * wF + leadership() + mechBonus()) * (1 + rng)
 }
-function runRace(cid) {
-  const c = get('SELECT * FROM circuits WHERE id=?', cid)
+// 赛站必须按 id（航线下行→上行）顺序参赛，前一站未完赛前后续赛站一律锁定
+function orderedCircuits() { return all('SELECT * FROM circuits ORDER BY id ASC') }
+// 当前唯一允许参赛的赛站：航线上第一个未完成的赛站；全部完赛时为 null
+function nextCircuit() { return orderedCircuits().find(c => !c.finished) || null }
+function runRace(c) {
   if (!c || c.finished) return null
   const mine = power(c) * (1 + c.diff * 0.02)
   const opps = []
@@ -74,26 +77,64 @@ function runRace(cid) {
     if (p) run('UPDATE pilots SET exp=exp+? , mood=mood-? WHERE id=?', rank <= 4 ? 3 : 1, rank > 8 ? 6 : 2, p.id)
   })
   run('UPDATE team SET money=money+?, rep=rep+?, season_pts=season_pts+? WHERE id=1', money, repGain, pts)
-  // 更新赛季名次：取本季最佳名次
+  // 更新赛季名次：取本季已完赛各站的最佳名次
   const ranksDone = all('SELECT rank FROM circuits WHERE finished=1')
   const best = Math.min(rank, ...ranksDone.map(r => r.rank))
   run('UPDATE team SET season_pos=? WHERE id=1', Math.max(1, best))
-  billSponsors(pts)
-  run('UPDATE circuits SET finished=1, rank=? WHERE id=?', rank, cid)
-  run('INSERT INTO race_log (circuit_id,season,rank,pts,money,note,ts) VALUES (?,?,?,?,?,?,?)', cid, teamCore().season, rank, pts, money, c.weather === '晴' ? `晴空万里，${c.name}` : `${c.weather}天，${c.name}`, now())
-  return { rank, pts, money, wear, parts_dur: newPd, repGain }
+  run('UPDATE circuits SET finished=1, rank=? WHERE id=?', rank, c.id)
+  run('INSERT INTO race_log (circuit_id,season,rank,pts,money,note,ts) VALUES (?,?,?,?,?,?,?)', c.id, teamCore().season, rank, pts, money, c.weather === '晴' ? `晴空万里，${c.name}` : `${c.weather}天，${c.name}`, now())
+  // 积分落账后再结算赞助：按积分阈值统一对账，顺序参赛下只会向前推进
+  reconcileSponsors()
+  return { circuit_id: c.id, rank, pts, money, wear, parts_dur: newPd, repGain }
 }
-function billSponsors(points) {
-  const t = teamCore()
+// 赞助商对账：以当前赛季积分为唯一事实来源，earned 与是否达标保持一致
+function reconcileSponsors() {
+  const pts = teamCore().season_pts
   all('SELECT * FROM sponsors').forEach(s => {
     if (!s.reward) return
-    if (t.season_pts >= s.target && !get('SELECT earned FROM sponsors WHERE id=?', s.id).earned) {
+    const reached = pts >= s.target
+    if (reached && !s.earned) {
       run('UPDATE team SET money=money+?, rep=rep+? WHERE id=1', s.reward, s.rep)
       run('UPDATE sponsors SET earned=1, affinity=affinity+10 WHERE id=?', s.id)
+    } else if (!reached && s.earned) {
+      run('UPDATE team SET money=money-?, rep=rep-? WHERE id=1', s.reward, s.rep)
+      run('UPDATE sponsors SET earned=0, affinity=affinity-10 WHERE id=?', s.id)
     }
   })
 }
+
+// 历史数据兼容：修复「跳站参赛」产生的脏数据——首个未完成赛站之后的完赛记录
+// 一律视为越站，回滚其积分/奖金/声望，删除流水并重置赛站，再统一重算赞助与赛季名次。
+// 部件磨损是完赛即发生的真实损耗，予以保留。
+function reconcileLegacySkips() {
+  const cs = orderedCircuits()
+  const firstOpen = cs.findIndex(c => !c.finished)
+  if (firstOpen === -1) return
+  const skipped = cs.slice(firstOpen + 1).filter(c => c.finished)
+  if (!skipped.length) return
+
+  let ptsBack = 0, moneyBack = 0, repBack = 0
+  skipped.forEach(c => {
+    all('SELECT * FROM race_log WHERE circuit_id=?', c.id).forEach(l => {
+      ptsBack += l.pts || 0
+      moneyBack += l.money || 0
+      run('DELETE FROM race_log WHERE id=?', l.id)
+    })
+    repBack += Math.max(1, 5 - (c.rank || 6) + c.diff)
+    console.log(`[SKY] 历史修复：赛站《${c.name}》在前置赛站未完成时已完赛（名次 ${c.rank}），回滚战绩与奖励`)
+    run('UPDATE circuits SET finished=0, rank=NULL WHERE id=?', c.id)
+  })
+  if (ptsBack || moneyBack || repBack) {
+    run('UPDATE team SET season_pts=MAX(0,season_pts-?), money=money-?, rep=rep-? WHERE id=1', ptsBack, moneyBack, repBack)
+  }
+
+  reconcileSponsors()
+  const ranks = orderedCircuits().filter(x => x.finished && x.rank).map(x => x.rank)
+  run('UPDATE team SET season_pos=? WHERE id=1', ranks.length ? Math.max(1, Math.min(...ranks)) : 1)
+  console.log(`[SKY] 历史修复完成：回滚 ${skipped.length} 个越站赛站，积分 -${ptsBack}，奖金 -${moneyBack}，声望 -${repBack}`)
+}
 seed()
+reconcileLegacySkips()
 
 /* ---------- 共享响应 ---------- */
 const payload = () => {
@@ -102,7 +143,7 @@ const payload = () => {
   const upgrades = all('SELECT * FROM upgrades')
   const pilots = all('SELECT * FROM pilots')
   const mechanics = all('SELECT * FROM mechanics')
-  const circuits = all('SELECT * FROM circuits')
+  const circuits = orderedCircuits()
   const sponsors = all('SELECT * FROM sponsors')
   const log = all('SELECT * FROM race_log ORDER BY id DESC')
   const done = circuits.filter(c => c.finished).length
@@ -170,10 +211,20 @@ app.post('/api/maintain', (req, res) => {
   res.json({ ok: true, cost })
 })
 
-// 竞速
+// 竞速：仅允许按航线顺序挑战当前未完成的第一站，前置赛站未完成时拒绝
 app.post('/api/race/:cid', (req, res) => {
-  const r = runRace(Number(req.params.cid))
-  if (!r) return res.status(200).json({ ok: false, msg: '该站未开启或已完赛' })
+  const cid = Number(req.params.cid)
+  const c = get('SELECT * FROM circuits WHERE id=?', cid)
+  if (!c) return res.json({ ok: false, msg: '该赛站不存在' })
+  if (c.finished) return res.json({ ok: false, msg: '该站已完赛' })
+  const cur = nextCircuit()
+  if (!cur) return res.json({ ok: false, msg: '本赛季已全部完赛' })
+  if (cur.id !== cid) {
+    const idx = orderedCircuits().findIndex(x => x.id === cid) + 1
+    return res.json({ ok: false, msg: `请先完成第 ${orderedCircuits().findIndex(x => x.id === cur.id) + 1} 站《${cur.name}》，第 ${idx} 站尚未解锁` })
+  }
+  const r = runRace(c)
+  if (!r) return res.json({ ok: false, msg: '该站未开启或已完赛' })
   res.json({ ok: true, ...r })
 })
 

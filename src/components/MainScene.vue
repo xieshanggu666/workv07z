@@ -10,24 +10,26 @@ const spots = [
   { x: 150, y: 480 }, { x: 320, y: 415 }, { x: 490, y: 350 },
   { x: 660, y: 290 }, { x: 828, y: 225 }, { x: 955, y: 170 }
 ]
-const done = computed(() => store.state?.seasonDone || 0)
-const total = computed(() => store.state?.seasonTotal || 6)
 const circuits = computed(() => store.circuits)
+// 赛季进度与航线解锁规则前后端一致：已完赛赛站数即进度，当前待赛站为第一个未完成站
+const done = computed(() => circuits.value.filter(c => c.finished).length)
+const total = computed(() => store.state?.seasonTotal || circuits.value.length || 6)
+const nextId = computed(() => circuits.value.find(c => !c.finished)?.id ?? null)
+function isOpen(c) { return !c.finished && c.id === nextId.value }
 
 const starting = ref(false)
-// 玩家游艇巡航位置：沿航线移动到当前站
+// 玩家游艇巡航位置：锁定在当前待赛站；全部完赛后停靠终点岛
 const playerPos = computed(() => {
-  const idx = Math.min(done.value, total.value - 1)
-  const p = spots[idx]
-  return p
+  const idx = Math.min(nextId.value == null ? total.value - 1 : circuits.value.findIndex(c => c.id === nextId.value), total.value - 1)
+  return spots[Math.max(0, idx)]
 })
 function fmt(c) { return '第 ' + c.rank + ' 名' }
-async function go(cid) {
-  if (starting.value) return
+async function go(c) {
+  if (starting.value || !isOpen(c)) return
   starting.value = true
-  const r = await store.race(cid)
+  const r = await store.race(c.id)
   if (r.ok) { await store.refresh(); emit('race', r) }
-  else store.tip(r.msg || '该站已完赛')
+  else store.tip(r.msg || '当前还不能参加该站')
   starting.value = false
 }
 </script>
@@ -75,6 +77,14 @@ async function go(cid) {
             <rect x="-6" y="-24" width="12" height="15" rx="2" fill="#fff5d0" stroke="#d9a441" stroke-width="1.5" />
             <text y="27" text-anchor="middle" font-size="15" font-weight="800" fill="#fff">{{ i + 1 }}</text>
 
+            <!-- 当前待赛站高亮脉冲环 -->
+            <circle v-if="isOpen(c)" cy="0" r="40" fill="none" stroke="#ffd76a" stroke-width="2.5" class="pulse-ring" />
+            <!-- 未解锁赛站锁标记 -->
+            <g v-if="!c.finished && !isOpen(c)" opacity=".9">
+              <circle cy="0" r="15" fill="rgba(12,14,42,.72)" stroke="rgba(159,193,255,.55)" stroke-width="1.5" />
+              <text y="5" text-anchor="middle" font-size="14">🔒</text>
+            </g>
+
             <!-- 云端标签 -->
             <g :transform="'translate(0,-46)'">
               <rect x="-52" y="-13" width="104" height="26" rx="13" fill="rgba(20,22,58,.78)" stroke="rgba(255,215,106,.5)" />
@@ -99,11 +109,13 @@ async function go(cid) {
         </g>
       </svg>
 
-      <!-- HTML 开赛按钮层：叠加在浮岛上方，任何点击方式均可命中 -->
+      <!-- HTML 开赛按钮层：叠加在浮岛上方，仅当前待赛站可点击，其余赛站锁定 -->
       <button v-for="(c, i) in circuits" :key="'b' + c.id" v-show="!c.finished"
-        class="start-btn" :disabled="starting"
+        class="start-btn" :class="{ locked: !isOpen(c) }"
+        :disabled="starting || !isOpen(c)"
+        :title="isOpen(c) ? '' : `请先完成前面的第 ${i} 站`"
         :style="{ left: (spots[i].x / 1060 * 100) + '%', top: ((spots[i].y - 8) / 600 * 100) + '%' }"
-        @click="go(c.id)">🚀 开赛</button>
+        @click="go(c)">{{ isOpen(c) ? '🚀 开赛' : '🔒 未解锁' }}</button>
     </div>
 
     <!-- 赛季进度浮条 -->

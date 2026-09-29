@@ -89,6 +89,18 @@ input:focus { border-color: var(--gold); }
 .start-btn:hover { filter: brightness(1.1); transform: translate(-50%, -52%); }
 .start-btn:active { transform: translate(-50%, -48%); }
 .start-btn:disabled { opacity: .5; cursor: wait; }
+.start-btn.locked {
+  background: rgba(20, 24, 60, .85); color: #9fc1ff; cursor: not-allowed;
+  border: 1px solid rgba(159, 193, 255, .4); box-shadow: none; padding: 6px 13px;
+}
+.start-btn.locked:disabled { opacity: .85; }
+.start-btn.locked:hover { filter: none; transform: translate(-50%, -50%); }
+.pulse-ring { transform-box: fill-box; transform-origin: center; animation: ringPulse 1.8s ease-out infinite; }
+@keyframes ringPulse {
+  0% { opacity: .9; transform: scale(.92); }
+  70% { opacity: 0; transform: scale(1.22); }
+  100% { opacity: 0; transform: scale(1.22); }
+}
 .scene-svg { width: 100%; height: 100%; }
 .play-btn rect, .play-btn text { transition: .15s; }
 .play-btn:hover rect { fill: #ffe199; transform: translateY(-1px); }
@@ -231,6 +243,7 @@ input:focus { border-color: var(--gold); }
 .race-rows { display: flex; flex-direction: column; gap: 8px; }
 .race-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; background: var(--glass); border: 1px solid var(--line); }
 .rname { flex: 1; font-weight: 600; font-size: 13px; }
+.rname .rseq { font-style: normal; color: var(--mint); font-size: 11px; font-weight: 700; margin-right: 8px; }
 .rmedal { font-size: 20px; }
 .rpts { color: var(--gold); font-size: 12px; }
 
