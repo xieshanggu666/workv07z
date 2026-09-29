@@ -10,24 +10,28 @@ const spots = [
   { x: 150, y: 480 }, { x: 320, y: 415 }, { x: 490, y: 350 },
   { x: 660, y: 290 }, { x: 828, y: 225 }, { x: 955, y: 170 }
 ]
-const done = computed(() => store.state?.seasonDone || 0)
+const done = computed(() => store.state?.seasonDone || 0)   // 沿航线连续完赛站数（后端口径）
 const total = computed(() => store.state?.seasonTotal || 6)
 const circuits = computed(() => store.circuits)
 
 const starting = ref(false)
-// 玩家游艇巡航位置：沿航线移动到当前站
+// 玩家游艇巡航位置：以后端下发的当前站 nextIdx 为准（不以前端计数推导）
 const playerPos = computed(() => {
-  const idx = Math.min(done.value, total.value - 1)
-  const p = spots[idx]
-  return p
+  const idx = Math.min(store.state?.nextIdx ?? done.value, total.value - 1)
+  return spots[idx]
 })
 function fmt(c) { return '第 ' + c.rank + ' 名' }
-async function go(cid) {
+async function go(c) {
   if (starting.value) return
+  // 开赛许可完全采用后端裁决，任何绕过按钮的调用也会被拦下
+  if (!c.open) {
+    store.tip(c.finished ? '该站已完赛' : `🔒 请先完成前置赛站（第 ${c.step} 站之前）`)
+    return
+  }
   starting.value = true
-  const r = await store.race(cid)
+  const r = await store.race(c.id)
   if (r.ok) { await store.refresh(); emit('race', r) }
-  else store.tip(r.msg || '该站已完赛')
+  else store.tip(r.msg || '该站暂不可开赛')
   starting.value = false
 }
 </script>
@@ -82,6 +86,10 @@ async function go(cid) {
               <text :x="c.weather === '晴' ? 0 : -14" y="24" text-anchor="middle" font-size="12" fill="#9fc1ff">{{ wIco[c.weather] }} {{ c.weather }} · 难度{{ '★'.repeat(c.diff) }}</text>
               <!-- 完赛标记 -->
               <text v-if="c.finished" y="40" text-anchor="middle" font-size="13" font-weight="800" fill="#6fe7d0">✔ {{ fmt(c) }}</text>
+              <!-- 未解锁标记 -->
+              <text v-else-if="!c.open" y="40" text-anchor="middle" font-size="13" font-weight="800" fill="#9aa3c7">🔒 未解锁</text>
+              <!-- 当前站标记 -->
+              <text v-else y="40" text-anchor="middle" font-size="13" font-weight="800" fill="#ffd76a">▶ 当前赛站</text>
             </g>
           </g>
         </g>
@@ -99,11 +107,12 @@ async function go(cid) {
         </g>
       </svg>
 
-      <!-- HTML 开赛按钮层：叠加在浮岛上方，任何点击方式均可命中 -->
+      <!-- HTML 开赛按钮层：只有后端标记 open 的当前站可点击，其余显示锁定态 -->
       <button v-for="(c, i) in circuits" :key="'b' + c.id" v-show="!c.finished"
-        class="start-btn" :disabled="starting"
+        class="start-btn" :class="{ locked: !c.open }" :disabled="starting || !c.open"
+        :title="c.open ? '' : '需先完成前置赛站'"
         :style="{ left: (spots[i].x / 1060 * 100) + '%', top: ((spots[i].y - 8) / 600 * 100) + '%' }"
-        @click="go(c.id)">🚀 开赛</button>
+        @click="go(c)">{{ c.open ? '🚀 开赛' : '🔒 未解锁' }}</button>
     </div>
 
     <!-- 赛季进度浮条 -->
@@ -111,6 +120,11 @@ async function go(cid) {
       <div class="ph-label">赛季航线进度</div>
       <div class="ph-bar"><i :style="{ width: (done / total * 100) + '%' }"></i></div>
       <div class="ph-nums mono">{{ done }} / {{ total }} 站完赛</div>
+    </div>
+
+    <!-- 历史跳站数据兼容提示：旧规则下产生的断站成绩予以保留，需回到断点补赛 -->
+    <div v-if="store.state?.legacyGap" class="legacy-tip">
+      ⚠ 检测到历史赛季中存在未按航线顺序完成的赛站，成绩与奖励已保留；请回到当前解锁站依次补赛。
     </div>
   </div>
 </template>

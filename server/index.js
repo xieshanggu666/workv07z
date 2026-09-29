@@ -8,6 +8,22 @@ const PTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
 const WEATHER = { '晴': 1.0, '风': 0.96, '雨': 0.9, '雾': 0.84, '雷暴': 0.78 }
 const now = () => new Date().toLocaleString('zh-CN')
 
+/* ---------- 航线顺序：唯一权威规则 ----------
+ * 赛站必须沿航线依次进行：只有航线中的第一座未完赛赛站可以开赛。
+ * 前端的锁定/解锁态一律以此处下发的 open / nextCid 为准，不自行推导。
+ */
+const circuitsOrdered = () => all('SELECT * FROM circuits ORDER BY id ASC')
+// 当前可开赛的赛站（第一座未完赛）；赛季全部完赛时为 null
+function nextCircuit(list) {
+  return (list || circuitsOrdered()).find(c => !c.finished) || null
+}
+// 沿航线连续完赛的赛站数（遇到第一座未完赛即截断，不把跳站成绩计入进度）
+function routeProgress(list) {
+  const cs = list || circuitsOrdered()
+  const firstOpen = cs.findIndex(c => !c.finished)
+  return firstOpen === -1 ? cs.length : firstOpen
+}
+
 function seed() {
   if (get('SELECT COUNT(*) c FROM team').c > 0) return
   run('INSERT INTO team (name) VALUES (?)', '苍穹疾风战队')
@@ -52,9 +68,18 @@ function power(circuit) {
   const rng = (Math.random() * 0.22 - 0.11)
   return (air * parts * wF + leadership() + mechBonus()) * (1 + rng)
 }
+// 返回 { ok:false, msg } 表示拒绝；{ ok:true, ...result } 表示结算成功
 function runRace(cid) {
-  const c = get('SELECT * FROM circuits WHERE id=?', cid)
-  if (!c || c.finished) return null
+  const cs = circuitsOrdered()
+  const c = cs.find(x => x.id === cid)
+  if (!c) return { ok: false, msg: '该赛站不存在' }
+  if (c.finished) return { ok: false, msg: '该站已完赛' }
+  // 前置校验：只允许第一座未完赛赛站开赛，杜绝跳站
+  const cur = nextCircuit(cs)
+  if (!cur || cur.id !== cid) {
+    const idx = cs.findIndex(x => !x.finished)
+    return { ok: false, msg: `前置赛站尚未完成，请先参加第 ${idx + 1} 站「${cs[idx].name}」` }
+  }
   const mine = power(c) * (1 + c.diff * 0.02)
   const opps = []
   for (let i = 0; i < 5; i++) {   // 5 名对手，共 6 艇竞技，名次 1-6
@@ -74,14 +99,14 @@ function runRace(cid) {
     if (p) run('UPDATE pilots SET exp=exp+? , mood=mood-? WHERE id=?', rank <= 4 ? 3 : 1, rank > 8 ? 6 : 2, p.id)
   })
   run('UPDATE team SET money=money+?, rep=rep+?, season_pts=season_pts+? WHERE id=1', money, repGain, pts)
-  // 更新赛季名次：取本季最佳名次
-  const ranksDone = all('SELECT rank FROM circuits WHERE finished=1')
-  const best = Math.min(rank, ...ranksDone.map(r => r.rank))
+  // 更新赛季名次：取本季最佳名次（仅统计已完赛赛站）
+  const ranksDone = cs.filter(x => x.finished).map(x => x.rank)
+  const best = Math.min(rank, ...ranksDone)
   run('UPDATE team SET season_pos=? WHERE id=1', Math.max(1, best))
   billSponsors(pts)
   run('UPDATE circuits SET finished=1, rank=? WHERE id=?', rank, cid)
   run('INSERT INTO race_log (circuit_id,season,rank,pts,money,note,ts) VALUES (?,?,?,?,?,?,?)', cid, teamCore().season, rank, pts, money, c.weather === '晴' ? `晴空万里，${c.name}` : `${c.weather}天，${c.name}`, now())
-  return { rank, pts, money, wear, parts_dur: newPd, repGain }
+  return { ok: true, rank, pts, money, wear, parts_dur: newPd, repGain, circuit_id: cid }
 }
 function billSponsors(points) {
   const t = teamCore()
@@ -102,11 +127,33 @@ const payload = () => {
   const upgrades = all('SELECT * FROM upgrades')
   const pilots = all('SELECT * FROM pilots')
   const mechanics = all('SELECT * FROM mechanics')
-  const circuits = all('SELECT * FROM circuits')
+  const circuitsList = circuitsOrdered()
   const sponsors = all('SELECT * FROM sponsors')
-  const log = all('SELECT * FROM race_log ORDER BY id DESC')
-  const done = circuits.filter(c => c.finished).length
-  return { team: t, airship: st, upgrades, pilots, mechanics, circuits, sponsors, log, seasonDone: done, seasonTotal: circuits.length }
+  // 战绩按赛季航线顺序展示（同赛季内按赛站先后），id 仅作并列兜底，不再按插入时间倒序
+  const log = all(`
+    SELECT l.* FROM race_log l
+    LEFT JOIN circuits c ON c.id = l.circuit_id
+    ORDER BY l.season ASC, c.id ASC, l.id ASC
+  `)
+  const cur = nextCircuit(circuitsList)
+  const routeStep = routeProgress(circuitsList)
+  const finishedCount = circuitsList.filter(c => c.finished).length
+  // 每站的开赛许可由后端统一裁决：当前站 open，已完赛/未解锁均不可开赛
+  const circuits = circuitsList.map((c, i) => ({
+    ...c,
+    step: i + 1,
+    open: !c.finished && cur?.id === c.id
+  }))
+  return {
+    team: t, airship: st, upgrades, pilots, mechanics, circuits, sponsors, log,
+    seasonDone: routeStep,        // 沿航线连续完赛站数，作为赛季进度唯一口径
+    finishedCount,                // 已结算站数（含历史跳站成绩，仅作展示）
+    seasonTotal: circuitsList.length,
+    nextCid: cur ? cur.id : null,
+    nextIdx: cur ? circuitsList.findIndex(c => c.id === cur.id) : circuitsList.length,
+    // 历史数据兼容：存在“已完赛但前序站未完赛”的跳站记录
+    legacyGap: finishedCount > routeStep
+  }
 }
 
 app.get('/api/state', (_, res) => res.json(payload()))
@@ -170,11 +217,11 @@ app.post('/api/maintain', (req, res) => {
   res.json({ ok: true, cost })
 })
 
-// 竞速
+// 竞速：顺序规则由 runRace 统一裁决（存在/已完赛/跳站）
 app.post('/api/race/:cid', (req, res) => {
   const r = runRace(Number(req.params.cid))
-  if (!r) return res.status(200).json({ ok: false, msg: '该站未开启或已完赛' })
-  res.json({ ok: true, ...r })
+  if (!r.ok) return res.status(200).json(r)
+  res.json(r)
 })
 
 // 重置（重置数据到初始种子）

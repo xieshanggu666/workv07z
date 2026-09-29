@@ -1,6 +1,8 @@
 <script setup>
+import { computed } from 'vue'
 import { useSkyStore } from '@/store/sky'
 const store = useSkyStore()
+const circuits = computed(() => store.circuits)
 const emit = defineEmits(['close'])
 </script>
 
@@ -32,12 +34,12 @@ const emit = defineEmits(['close'])
           </div>
         </section>
 
-        <!-- 战绩 -->
+        <!-- 战绩：后端已按赛季航线顺序排序（第 1 站 → 第 N 站） -->
         <section>
           <div class="sec-h"><b>🏁 本赛季战绩</b></div>
           <div v-if="(store.state?.log || []).length" class="race-rows">
-            <div v-for="l in store.state?.log?.slice().reverse() || []" :key="l.id" class="race-row">
-              <span class="rname">{{ store.circuits.find(c => c.id === l.circuit_id)?.name }}</span>
+            <div v-for="l in (store.state?.log || [])" :key="l.id" class="race-row">
+              <span class="rname">第{{ circuits.find(c => c.id === l.circuit_id)?.step || '—' }}站 · {{ circuits.find(c => c.id === l.circuit_id)?.name || '未知赛站' }}</span>
               <span class="rmedal" :class="'m' + l.rank">{{ l.rank <= 3 ? ['🥇','🥈','🥉'][l.rank-1] : '🌊' }}</span>
               <span class="rpts mono">+{{ l.pts }} 分</span>
             </div>
